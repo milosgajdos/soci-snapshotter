@@ -8,38 +8,60 @@ on:
         required: true
         default: 'honor-mirrors'
 
+permissions:
+  contents: write
+
 env:
   GO_VERSION: '1.25.7'
 
 jobs:
-  build:
+  build-and-release:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
+
       - uses: actions/setup-go@v6
         with:
           go-version: ${{ env.GO_VERSION }}
 
+      - name: Set release tag
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          REF_SLUG=$(echo "${{ inputs.ref }}" | sed 's/[^a-zA-Z0-9._-]/-/g')
+          echo "RELEASE_TAG=build-${REF_SLUG}-${SHORT_SHA}" >> $GITHUB_ENV
+
       - name: Build dynamic binaries
         run: make build
 
-      - name: Upload dynamic binaries
-        uses: actions/upload-artifact@v6
-        with:
-          name: soci-binaries-dynamic-${{ github.sha }}
-          path: out/
-          if-no-files-found: error
+      - name: Package dynamic binaries
+        run: |
+          mkdir -p release
+          cp NOTICE.md out/
+          tar -czvf release/soci-snapshotter-linux-amd64.tar.gz -C out .
 
       - name: Build static binaries
         run: |
           rm -rf out/
           STATIC=1 make build
 
-      - name: Upload static binaries
-        uses: actions/upload-artifact@v6
+      - name: Package static binaries
+        run: |
+          cp NOTICE.md out/
+          tar -czvf release/soci-snapshotter-linux-amd64-static.tar.gz -C out .
+
+      - name: Generate checksums
+        run: |
+          cd release
+          sha256sum soci-snapshotter-linux-amd64.tar.gz > soci-snapshotter-linux-amd64.tar.gz.sha256sum
+          sha256sum soci-snapshotter-linux-amd64-static.tar.gz > soci-snapshotter-linux-amd64-static.tar.gz.sha256sum
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: soci-binaries-static-${{ github.sha }}
-          path: out/
-          if-no-files-found: error
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          prerelease: true
+          generate_release_notes: false
+          files: release/*
