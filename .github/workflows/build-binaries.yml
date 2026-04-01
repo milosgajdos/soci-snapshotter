@@ -1,0 +1,45 @@
+name: Build Binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch to build from'
+        required: true
+        default: 'honor-mirrors'
+
+env:
+  GO_VERSION: '1.25.7'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build dynamic binaries
+        run: make build
+
+      - name: Upload dynamic binaries
+        uses: actions/upload-artifact@v6
+        with:
+          name: soci-binaries-dynamic-${{ github.sha }}
+          path: out/
+          if-no-files-found: error
+
+      - name: Build static binaries
+        run: |
+          rm -rf out/
+          STATIC=1 make build
+
+      - name: Upload static binaries
+        uses: actions/upload-artifact@v6
+        with:
+          name: soci-binaries-static-${{ github.sha }}
+          path: out/
+          if-no-files-found: error
