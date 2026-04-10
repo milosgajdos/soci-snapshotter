@@ -122,7 +122,11 @@ func NewSociSnapshotterService(ctx context.Context, root string, serviceCfg *con
 		snOpts = append(snOpts, snbase.AllowInvalidMountsOnRestart)
 	}
 	if serviceCfg.PullModes.Parallel.Enable {
-		snOpts = append(snOpts, snbase.ParallelPullUnpack)
+		pullMode := snbase.PullModeParallel
+		if serviceCfg.PullModes.Parallel.OnMissingIndex {
+			pullMode = snbase.PullModeHybridParallelOnNoIndex
+		}
+		snOpts = append(snOpts, snbase.WithPullMode(pullMode))
 	}
 
 	snapshotter, err = snbase.NewSnapshotter(ctx, snapshotterRoot(root), fs, snOpts...)

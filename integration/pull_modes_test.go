@@ -280,6 +280,74 @@ func TestDanglingV2Annotation(t *testing.T) {
 	}
 }
 
+func TestHybridPullModes(t *testing.T) {
+	regConfig := newRegistryConfig()
+	sh, done := newShellWithRegistry(t, regConfig)
+	defer done()
+
+	srcInfo := dockerhub(nginxImage)
+	rawDstInfo := regConfig.mirror(nginxImage + "-hybrid-raw")
+	sociDstInfo := regConfig.mirror(nginxImage + "-hybrid-soci")
+	sh.X("nerdctl", "login", "-u", regConfig.user, "-p", regConfig.pass, rawDstInfo.ref)
+
+	rebootContainerd(t, sh, "", "")
+	v2IndexDigest := createAndPushV2Index(t, sh, srcInfo, sociDstInfo)
+	copyImage(sh, srcInfo, rawDstInfo)
+
+	testCases := []struct {
+		name           string
+		target         imageInfo
+		opts           []snapshotterConfigOpt
+		expectedDigest string
+		checkSnapshots func(t *testing.T, rsm *testutil.RemoteSnapshotMonitor)
+	}{
+		{
+			name:           "soci image stays on lazy remote path",
+			target:         sociDstInfo,
+			opts:           []snapshotterConfigOpt{withPullModes(hybridPullModes()), withContainerdContentStore()},
+			expectedDigest: v2IndexDigest,
+			checkSnapshots: func(t *testing.T, rsm *testutil.RemoteSnapshotMonitor) {
+				rsm.CheckAllRemoteSnapshots(t)
+			},
+		},
+		{
+			name:   "raw image falls back to parallel local path",
+			target: rawDstInfo,
+			opts:   []snapshotterConfigOpt{withPullModes(hybridPullModes()), withContainerdContentStore()},
+			checkSnapshots: func(t *testing.T, rsm *testutil.RemoteSnapshotMonitor) {
+				rsm.CheckAllLocalSnapshots(t)
+			},
+		},
+		{
+			name:   "min layer size skip stays on local path",
+			target: sociDstInfo,
+			opts: []snapshotterConfigOpt{
+				withPullModes(hybridPullModes()),
+				withContainerdContentStore(),
+				withMinLayerSizeConfig(int64(1 << 60)),
+			},
+			checkSnapshots: func(t *testing.T, rsm *testutil.RemoteSnapshotMonitor) {
+				rsm.CheckAllLocalSnapshots(t)
+			},
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			rsm := testutil.NewRemoteSnapshotMonitor()
+			idm := testutil.NewIndexDigestMonitor()
+			m := rebootContainerd(t, sh, "", getSnapshotterConfigToml(t, testCase.opts...), rsm.MonitorFunc, idm.MonitorFunc)
+			defer m.Cleanup(t)
+
+			sh.X(append(imagePullCmd, testCase.target.ref)...)
+			testCase.checkSnapshots(t, rsm)
+			if idm.IndexDigest != testCase.expectedDigest {
+				t.Fatalf("expected digest %q, got %q", testCase.expectedDigest, idm.IndexDigest)
+			}
+		})
+	}
+}
+
 func testDanglingV2Annotation(t *testing.T, imgName string) {
 	regConfig := newRegistryConfig()
 	sh, done := newShellWithRegistry(t, regConfig)
@@ -363,4 +431,13 @@ func testDanglingV2Annotation(t *testing.T, imgName string) {
 	if strings.Trim(string(v2IndexDigest), "\n") != indexDigestUsed {
 		t.Fatalf("expected v2 index digest %s, got %s", v2IndexDigest, indexDigestUsed)
 	}
+}
+
+func hybridPullModes() config.PullModes {
+	pullModes := config.DefaultPullModes()
+	pullModes.SOCIv1.Enable = false
+	pullModes.SOCIv2.Enable = true
+	pullModes.Parallel.Enable = true
+	pullModes.Parallel.OnMissingIndex = true
+	return pullModes
 }

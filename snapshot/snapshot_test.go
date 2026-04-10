@@ -35,14 +35,17 @@ package snapshot
 import (
 	"context"
 	_ "crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 	"testing"
 
+	"github.com/awslabs/soci-snapshotter/fs/source"
 	"github.com/awslabs/soci-snapshotter/idtools"
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/pkg/testutil"
 	"github.com/containerd/containerd/snapshots"
 	"github.com/containerd/containerd/snapshots/overlay/overlayutils"
@@ -372,6 +375,113 @@ func TestFailureDetection(t *testing.T) {
 	}
 }
 
+func TestPrepareRoutingWithParallelOnMissingIndex(t *testing.T) {
+	tests := []struct {
+		name              string
+		opts              []Opt
+		mountErr          error
+		labels            map[string]string
+		wantErrAlready    bool
+		wantMounts        bool
+		wantMountCalls    int
+		wantLocalCalls    int
+		wantParallelCalls int
+	}{
+		{
+			name:           "parallel disabled defers to runtime on no index",
+			mountErr:       ErrNoIndex,
+			wantMounts:     true,
+			wantMountCalls: 1,
+		},
+		{
+			name:              "parallel enabled without fallback skips remote prep",
+			opts:              []Opt{WithPullMode(PullModeParallel)},
+			mountErr:          ErrNoIndex,
+			wantErrAlready:    true,
+			wantParallelCalls: 1,
+		},
+		{
+			name:           "hybrid mode keeps lazy path on remote success",
+			opts:           []Opt{WithPullMode(PullModeHybridParallelOnNoIndex)},
+			wantErrAlready: true,
+			wantMountCalls: 1,
+		},
+		{
+			name:              "hybrid mode falls back to parallel on no index",
+			opts:              []Opt{WithPullMode(PullModeHybridParallelOnNoIndex)},
+			mountErr:          ErrNoIndex,
+			wantErrAlready:    true,
+			wantMountCalls:    1,
+			wantParallelCalls: 1,
+		},
+		{
+			name:           "hybrid mode keeps local path on no ztoc",
+			opts:           []Opt{WithPullMode(PullModeHybridParallelOnNoIndex)},
+			mountErr:       ErrNoZtoc,
+			wantErrAlready: true,
+			wantMountCalls: 1,
+			wantLocalCalls: 1,
+		},
+		{
+			name:           "hybrid mode keeps local path on other remote errors",
+			opts:           []Opt{WithPullMode(PullModeHybridParallelOnNoIndex)},
+			mountErr:       errors.New("remote failure"),
+			wantErrAlready: true,
+			wantMountCalls: 1,
+			wantLocalCalls: 1,
+		},
+		{
+			name: "hybrid mode keeps local path when min layer size skips remote prep",
+			opts: []Opt{WithPullMode(PullModeHybridParallelOnNoIndex), WithMinLayerSize(100)},
+			labels: map[string]string{
+				source.TargetSizeLabel: "10",
+			},
+			wantErrAlready: true,
+			wantLocalCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := namespaces.WithNamespace(context.Background(), "test")
+			root := t.TempDir()
+			fs := &recordingFs{mountErr: tt.mountErr}
+			sn, err := NewSnapshotter(ctx, root, fs, tt.opts...)
+			if err != nil {
+				t.Fatalf("failed to make new snapshotter: %v", err)
+			}
+
+			labels := make(map[string]string, len(tt.labels)+1)
+			for k, v := range tt.labels {
+				labels[k] = v
+			}
+			labels[targetSnapshotLabel] = "target"
+
+			mounts, err := sn.Prepare(ctx, "key", "", snapshots.WithLabels(labels))
+			if tt.wantErrAlready {
+				if !errdefs.IsAlreadyExists(err) {
+					t.Fatalf("expected already exists error, got %v", err)
+				}
+			} else if err != nil {
+				t.Fatalf("expected no error, got %v", err)
+			}
+
+			if gotMounts := len(mounts) > 0; gotMounts != tt.wantMounts {
+				t.Fatalf("expected mounts=%v, got mounts=%v", tt.wantMounts, gotMounts)
+			}
+			if fs.mountCalls != tt.wantMountCalls {
+				t.Fatalf("expected Mount() calls=%d, got %d", tt.wantMountCalls, fs.mountCalls)
+			}
+			if fs.mountLocalCalls != tt.wantLocalCalls {
+				t.Fatalf("expected MountLocal() calls=%d, got %d", tt.wantLocalCalls, fs.mountLocalCalls)
+			}
+			if fs.mountParallelCalls != tt.wantParallelCalls {
+				t.Fatalf("expected MountParallel() calls=%d, got %d", tt.wantParallelCalls, fs.mountParallelCalls)
+			}
+		})
+	}
+}
+
 func bindFileSystem(t *testing.T) FileSystem {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, remoteSampleFile), []byte(remoteSampleFileContents), 0660); err != nil {
@@ -389,6 +499,48 @@ type bindFs struct {
 	root         string
 	checkFailure bool
 	broken       map[string]bool
+}
+
+type recordingFs struct {
+	mountErr           error
+	mountCalls         int
+	mountLocalCalls    int
+	mountParallelCalls int
+}
+
+func (fs *recordingFs) Mount(ctx context.Context, mountpoint string, labels map[string]string) error {
+	fs.mountCalls++
+	return fs.mountErr
+}
+
+func (fs *recordingFs) Check(ctx context.Context, mountpoint string, labels map[string]string) error {
+	return nil
+}
+
+func (fs *recordingFs) Unmount(ctx context.Context, mountpoint string) error {
+	return nil
+}
+
+func (fs *recordingFs) MountLocal(ctx context.Context, mountpoint string, labels map[string]string, mounts []mount.Mount) error {
+	fs.mountLocalCalls++
+	return nil
+}
+
+func (fs *recordingFs) MountParallel(ctx context.Context, mountpoint string, labels map[string]string, mounts []mount.Mount) error {
+	fs.mountParallelCalls++
+	return nil
+}
+
+func (fs *recordingFs) IDMapMount(ctx context.Context, mountpoint, activeLayerID string, idmap idtools.IDMap) (string, error) {
+	return mountpoint, nil
+}
+
+func (fs *recordingFs) IDMapMountLocal(ctx context.Context, mountpoint, activeLayerID string, idmap idtools.IDMap) (string, error) {
+	return mountpoint, nil
+}
+
+func (fs *recordingFs) CleanImage(ctx context.Context, digest string) error {
+	return nil
 }
 
 func (fs *bindFs) Mount(ctx context.Context, mountpoint string, labels map[string]string) error {

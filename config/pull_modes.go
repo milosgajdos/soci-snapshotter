@@ -43,7 +43,8 @@ type V2 struct {
 // aims to speed up the process via concurrent operations.
 type Parallel struct {
 	ParallelConfig
-	Enable bool `toml:"enable"`
+	Enable         bool `toml:"enable"`
+	OnMissingIndex bool `toml:"on_missing_index"`
 }
 
 func defaultPullModes(cfg *Config) error {

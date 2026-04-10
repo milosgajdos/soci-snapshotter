@@ -47,6 +47,11 @@ func TestConfigDefaults(t *testing.T) {
 			actual:   cfg.PullModes.Parallel.Enable,
 		},
 		{
+			name:     "parallel on missing index disabled",
+			expected: false,
+			actual:   cfg.PullModes.Parallel.OnMissingIndex,
+		},
+		{
 			name:     "metrics network",
 			expected: defaultMetricsNetwork,
 			actual:   cfg.MetricsNetwork,
@@ -257,6 +262,25 @@ args = ["-d", "-c"]
 				}
 				if len(actual.PullModes.Parallel.DecompressStreams["zstd"].Args) != 2 {
 					t.Errorf("Expected two args, got %d", len(actual.PullModes.Parallel.DecompressStreams["zstd"].Args))
+				}
+			},
+		},
+		{
+			name: "ParallelOnMissingIndex",
+			config: []byte(`
+[pull_modes.parallel_pull_unpack]
+enable = true
+on_missing_index = true
+`),
+			assert: func(t *testing.T, actual *Config, err error) {
+				if err != nil {
+					t.Errorf("Expected no error, got %v", err)
+				}
+				if !actual.PullModes.Parallel.Enable {
+					t.Error("Expected parallel pull/unpack to be enabled")
+				}
+				if !actual.PullModes.Parallel.OnMissingIndex {
+					t.Error("Expected on_missing_index to be enabled")
 				}
 			},
 		},
